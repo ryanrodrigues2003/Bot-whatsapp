@@ -3,6 +3,8 @@ from flask import Flask, request, jsonify
 from groq import Groq
 
 app = Flask(__name__)
+# Garante que os acentos fiquem em UTF-8 no JSON
+app.config['JSON_AS_ASCII'] = False
 
 client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 
