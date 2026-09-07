@@ -4,7 +4,6 @@ from groq import Groq
 
 app = Flask(__name__)
 
-# Pega a chave das variáveis de ambiente
 client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 
 @app.route('/', methods=['GET'])
@@ -13,19 +12,21 @@ def home():
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
-    data = request.get_json()
+    data = request.get_json() or {}
     message = data.get("message", "")
     
     if not message:
         return jsonify({"error": "Mensagem vazia"}), 400
 
-    completion = client.chat.completions.create(
-        model="openai/gpt-oss-20b",
-        messages=[{"role": "user", "content": message}]
-    )
-
-    reply = completion.choices[0].message.content
-    return jsonify({"response": reply}), 200
+    try:
+        completion = client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[{"role": "user", "content": message}]
+        )
+        reply = completion.choices[0].message.content
+        return jsonify({"response": reply}), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
