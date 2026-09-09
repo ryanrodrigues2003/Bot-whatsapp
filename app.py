@@ -1,5 +1,6 @@
 import os
 import requests
+import threading
 from flask import Flask, request, jsonify
 
 app = Flask(__name__)
@@ -22,18 +23,18 @@ def enviar_mensagem_whatsapp(numero, texto):
         "number": numero,
         "text": texto
     }
-    print(f"Enviando para Evolution API -> URL: {url} | Número: {numero}")
+    print(f"-> Enviando para Evolution API | Número: {numero}")
     try:
-        response = requests.post(url, json=payload, headers=headers, timeout=15)
-        print(f"Status envio WhatsApp: {response.status_code} - Resposta: {response.text}")
+        response = requests.post(url, json=payload, headers=headers, timeout=20)
+        print(f"<- Status envio WhatsApp: {response.status_code} - Resposta: {response.text}")
         return response.json()
     except Exception as e:
-        print(f"ERRO CRÍTICO no envio WhatsApp: {e}")
+        print(f"X ERRO CRÍTICO no envio WhatsApp: {e}")
         return None
 
 def obter_resposta_groq(numero_remetente, mensagem_usuario):
     if not GROQ_API_KEY:
-        print("ERRO: GROQ_API_KEY não configurada no ambiente!")
+        print("X ERRO: GROQ_API_KEY não configurada!")
         return "Erro interno: Chave Groq não configurada."
 
     url = "https://api.groq.com/openai/v1/chat/completions"
@@ -75,18 +76,27 @@ def obter_resposta_groq(numero_remetente, mensagem_usuario):
     }
 
     try:
-        response = requests.post(url, json=payload, headers=headers, timeout=15)
-        print(f"Status Groq: {response.status_code}")
+        print(f"-> Consultando IA Groq para {numero_remetente}...")
+        response = requests.post(url, json=payload, headers=headers, timeout=20)
+        print(f"<- Status Groq: {response.status_code}")
         if response.status_code == 200:
             resposta_ia = response.json()["choices"][0]["message"]["content"]
             historico_conversas[numero_remetente].append({"role": "assistant", "content": resposta_ia})
             return resposta_ia
         else:
-            print(f"Erro Groq Detalhes: {response.text}")
+            print(f"X Erro Groq Detalhes: {response.text}")
             return "Ocorreu um erro ao processar sua solicitação com a IA."
     except Exception as e:
-        print(f"Exceção Groq: {e}")
+        print(f"X Exceção Groq: {e}")
         return "Desculpe, tive um problema ao tentar responder agora."
+
+def processar_background(numero_remetente, mensagem_texto):
+    try:
+        resposta_ai = obter_resposta_groq(numero_remetente, mensagem_texto)
+        print(f"-> Resposta gerada pela IA: {resposta_ai}")
+        enviar_mensagem_whatsapp(numero_remetente, resposta_ai)
+    except Exception as e:
+        print(f"X Erro no background worker: {e}")
 
 @app.route('/', methods=['GET'])
 def home():
@@ -111,7 +121,7 @@ def webhook():
             numero_remetente = ''.join(filter(str.isdigit, remote_jid.split('@')[0]))
             
             if not numero_remetente:
-                numero_remetente = "559870166848"
+                return jsonify({"status": "ignored_no_number"}), 200
 
             message_content = msg_data.get('message', {})
             mensagem_texto = (
@@ -122,13 +132,14 @@ def webhook():
             if not mensagem_texto:
                 return jsonify({"status": "ignored_non_text_message"}), 200
 
-            print(f"Processando mensagem de {numero_remetente}: {mensagem_texto}")
-            resposta_ai = obter_resposta_groq(numero_remetente, mensagem_texto)
-            print(f"Resposta gerada pela IA: {resposta_ai}")
-            enviar_mensagem_whatsapp(numero_remetente, resposta_ai)
+            print(f"-> Webhook aceito | Mensagem de {numero_remetente}: {mensagem_texto}")
+            
+            # Dispara em background para liberar o webhook imediatamente
+            t = threading.Thread(target=processar_background, args=(numero_remetente, mensagem_texto))
+            t.start()
 
     except Exception as e:
-        print(f"Erro geral no webhook: {e}")
+        print(f"X Erro geral no webhook: {e}")
 
     return jsonify({"status": "success"}), 200
 
