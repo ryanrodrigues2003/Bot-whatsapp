@@ -10,6 +10,11 @@ EVOLUTION_API_KEY = "minhasenha123"
 INSTANCE_NAME = "bot_whatsapp"
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 
+# Dicionário para armazenar o histórico de conversas por número de telefone
+# Formato: { "559870166848": [ {"role": "user", "content": "..."}, {"role": "assistant", "content": "..."} ] }
+historico_conversas = {}
+MAX_HISTORICO = 10  # Mantém as últimas 10 mensagens para não estourar o limite de tokens
+
 
 def enviar_mensagem_whatsapp(numero, texto):
     url = f"{EVOLUTION_API_URL}/message/sendText/{INSTANCE_NAME}"
@@ -30,9 +35,9 @@ def enviar_mensagem_whatsapp(numero, texto):
         return None
 
 
-def obter_resposta_groq(mensagem_usuario):
+def obter_resposta_groq(numero_remetente, mensagem_usuario):
     if not GROQ_API_KEY:
-        print("ERRO: GROQ_API_KEY não foi configurada nas variáveis de ambiente do Render.")
+        print("ERRO: GROQ_API_KEY não configurada.")
         return "Erro interno: Chave Groq não configurada."
 
     url = "https://api.groq.com/openai/v1/chat/completions"
@@ -41,7 +46,7 @@ def obter_resposta_groq(mensagem_usuario):
         "Content-Type": "application/json"
     }
 
-    # PROMPT DE ATENDENTE DE PIZZARIA
+    # Prompt do Sistema (Atendente da Pizzaria)
     prompt_pizzaria = (
         "Você é o Mario, atendente virtual simpático e ágil da 'Pizzaria Bella Italia'.\n"
         "Sua missão é atender os clientes no WhatsApp, apresentar o cardápio e anotar pedidos.\n\n"
@@ -53,18 +58,29 @@ def obter_resposta_groq(mensagem_usuario):
         "- Taxa de entrega fixa: R$ 7,00.\n\n"
         "REGRAS DE ATENDIMENTO:\n"
         "1. Seja sempre educado, amigável e use emojis com moderação.\n"
-        "2. Se o cliente apenas saudar, cumprimente-o e pergunte o que gostaria de pedir hoje.\n"
+        "2. Preste atenção no histórico da conversa para não esquecer o sabor, tamanho ou bebidas já escolhidos pelo cliente.\n"
         "3. Guie o cliente passo a passo: Sabor e Tamanho -> Bebida -> Endereço de Entrega -> Forma de Pagamento (Pix, Cartão ou Dinheiro).\n"
-        "4. Quando o cliente confirmar todos os itens, mostre o RESUMO DO PEDIDO com os valores detalhados, o valor total (com a taxa de entrega de R$ 7) e o tempo estimado de entrega (40 a 50 minutos).\n"
-        "5. Responda apenas dúvidas sobre a pizzaria. Se o cliente perguntar algo fora desse assunto, redirecione educadamente para o atendimento do restaurante."
+        "4. Quando o cliente confirmar todos os itens e dados, mostre o RESUMO DO PEDIDO com os valores detalhados, o total (com taxa de R$ 7) e o tempo estimado (40 a 50 min).\n"
+        "5. Se o cliente pedir para falar com um atendente humano, responda educadamente que vai transferir o atendimento."
     )
+
+    # Inicializa o histórico do número se não existir
+    if numero_remetente not in historico_conversas:
+        historico_conversas[numero_remetente] = []
+
+    # Adiciona a mensagem atual do usuário ao histórico
+    historico_conversas[numero_remetente].append({"role": "user", "content": mensagem_usuario})
+
+    # Mantém apenas as últimas mensagens para economizar espaço e tokens
+    if len(historico_conversas[numero_remetente]) > MAX_HISTORICO:
+        historico_conversas[numero_remetente] = historico_conversas[numero_remetente][-MAX_HISTORICO:]
+
+    # Monta a estrutura de mensagens enviando o System Prompt + Histórico completo da sessão
+    mensagens_payload = [{"role": "system", "content": prompt_pizzaria}] + historico_conversas[numero_remetente]
 
     payload = {
         "model": "openai/gpt-oss-20b",
-        "messages": [
-            {"role": "system", "content": prompt_pizzaria},
-            {"role": "user", "content": mensagem_usuario}
-        ],
+        "messages": mensagens_payload,
         "temperature": 0.6
     }
 
@@ -72,7 +88,12 @@ def obter_resposta_groq(mensagem_usuario):
         response = requests.post(url, json=payload, headers=headers, timeout=15)
         print(f"Status Groq: {response.status_code}")
         if response.status_code == 200:
-            return response.json()["choices"][0]["message"]["content"]
+            resposta_ia = response.json()["choices"][0]["message"]["content"]
+            
+            # Adiciona a resposta da IA ao histórico da conversa
+            historico_conversas[numero_remetente].append({"role": "assistant", "content": resposta_ia})
+            
+            return resposta_ia
         else:
             print(f"Erro Resposta Groq: {response.text}")
             return "Ocorreu um erro ao processar sua solicitação."
@@ -83,7 +104,7 @@ def obter_resposta_groq(mensagem_usuario):
 
 @app.route('/', methods=['GET'])
 def home():
-    return "Servidor ativo!", 200
+    return "Servidor ativo com memória!", 200
 
 
 @app.route('/webhook', methods=['POST'])
@@ -104,6 +125,7 @@ def webhook():
             remote_jid = key.get('remoteJid', '')
             numero_remetente = remote_jid.split('@')[0]
 
+            # Mantém a restrição apenas para o número de teste
             if numero_remetente != NUMERO_PERMITIDO:
                 return jsonify({"status": "ignored_unauthorized_number"}), 200
 
@@ -117,7 +139,7 @@ def webhook():
                 return jsonify({"status": "ignored_non_text_message"}), 200
 
             print(f"Mensagem recebida de {numero_remetente}: {mensagem_texto}")
-            resposta_ai = obter_resposta_groq(mensagem_texto)
+            resposta_ai = obter_resposta_groq(numero_remetente, mensagem_texto)
             enviar_mensagem_whatsapp(numero_remetente, resposta_ai)
 
     except Exception as e:
