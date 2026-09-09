@@ -23,35 +23,42 @@ def enviar_mensagem_whatsapp(numero, texto):
     }
     try:
         response = requests.post(url, json=payload, headers=headers, timeout=10)
+        print(f"Status envio WhatsApp: {response.status_code}")
         return response.json()
     except Exception as e:
-        print(f"Erro ao enviar: {e}")
+        print(f"Erro envio WhatsApp: {e}")
         return None
 
 
 def obter_resposta_groq(mensagem_usuario):
     if not GROQ_API_KEY:
-        return "Erro: GROQ_API_KEY não configurada."
+        print("ERRO: GROQ_API_KEY não foi configurada nas variáveis de ambiente do Render.")
+        return "Erro interno: Chave Groq não configurada."
 
     url = "https://api.groq.com/openai/v1/chat/completions"
     headers = {
-        "Authorization": f"Bearer {GROQ_API_KEY}",
+        "Authorization": f"Bearer {GROQ_API_KEY.strip()}",
         "Content-Type": "application/json"
     }
     payload = {
-        "model": "llama-3.3-70b-versatile",
+        "model": "openai/gpt-oss-20b",
         "messages": [
-            {"role": "system", "content": "Você é um assistente virtual prestativo e conciso no WhatsApp."},
+            {"role": "system", "content": "Você é um assistente virtual prestativo e carinhoso no WhatsApp."},
             {"role": "user", "content": mensagem_usuario}
         ],
         "temperature": 0.7
     }
+
     try:
         response = requests.post(url, json=payload, headers=headers, timeout=15)
+        print(f"Status Groq: {response.status_code}")
         if response.status_code == 200:
             return response.json()["choices"][0]["message"]["content"]
-        return "Ocorreu um erro ao processar sua solicitação."
+        else:
+            print(f"Erro Resposta Groq: {response.text}")
+            return "Ocorreu um erro ao processar sua solicitação."
     except Exception as e:
+        print(f"Exceção Groq: {e}")
         return "Desculpe, tive um problema ao tentar responder agora."
 
 
@@ -90,6 +97,7 @@ def webhook():
             if not mensagem_texto:
                 return jsonify({"status": "ignored_non_text_message"}), 200
 
+            print(f"Mensagem recebida de {numero_remetente}: {mensagem_texto}")
             resposta_ai = obter_resposta_groq(mensagem_texto)
             enviar_mensagem_whatsapp(numero_remetente, resposta_ai)
 
