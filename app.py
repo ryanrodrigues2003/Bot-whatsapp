@@ -10,24 +10,103 @@ EVOLUTION_API_KEY = "minhasenha123"
 INSTANCE_NAME = "bot_whatsapp"
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 
+# Dicionário para armazenar o histórico de conversas por número de telefone
 historico_conversas = {}
+MAX_HISTORICO = 10  # Mantém as últimas 10 mensagens para contexto
+
+
+def enviar_mensagem_whatsapp(numero, texto):
+    url = f"{EVOLUTION_API_URL}/message/sendText/{INSTANCE_NAME}"
+    headers = {
+        "apikey": EVOLUTION_API_KEY,
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "number": numero,
+        "text": texto
+    }
+    try:
+        response = requests.post(url, json=payload, headers=headers, timeout=10)
+        print(f"Status envio WhatsApp: {response.status_code}")
+        return response.json()
+    except Exception as e:
+        print(f"Erro envio WhatsApp: {e}")
+        return None
+
+
+def obter_resposta_groq(numero_remetente, mensagem_usuario):
+    if not GROQ_API_KEY:
+        print("ERRO: GROQ_API_KEY não configurada.")
+        return "Erro interno: Chave Groq não configurada."
+
+    url = "https://api.groq.com/openai/v1/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {GROQ_API_KEY.strip()}",
+        "Content-Type": "application/json"
+    }
+
+    prompt_pizzaria = (
+        "Você é o Mario, atendente virtual simpático e ágil da 'Pizzaria Bella Italia'.\n"
+        "Sua missão é atender os clientes no WhatsApp, apresentar o cardápio e anotar pedidos.\n\n"
+        "CARDÁPIO:\n"
+        "- Tamanhos: Média (6 fatias - R$ 40), Grande (8 fatias - R$ 50), Gigante (12 fatias - R$ 65).\n"
+        "- Sabores Tradicionais: Calabresa, Mussarela, Margherita, Frango com Catupiry.\n"
+        "- Sabores Especiais (+ R$ 5): Quatro Queijos, Bacon com Cheddar, Portuguesa.\n"
+        "- Bebidas: Coca-Cola 2L (R$ 12), Guaraná 2L (R$ 10), Água (R$ 4).\n"
+        "- Taxa de entrega fixa: R$ 7,00.\n\n"
+        "REGRAS DE ATENDIMENTO:\n"
+        "1. Seja sempre educado, amigável e use emojis com moderação.\n"
+        "2. Preste atenção no histórico da conversa para não esquecer o sabor, tamanho ou bebidas já escolhidos pelo cliente.\n"
+        "3. Guie o cliente passo a passo: Sabor e Tamanho -> Bebida -> Endereço de Entrega -> Forma de Pagamento (Pix, Cartão ou Dinheiro).\n"
+        "4. Quando o cliente confirmar todos os itens e dados, mostre o RESUMO DO PEDIDO com os valores detalhados, o total (com taxa de R$ 7) e o tempo estimado (40 a 50 min).\n"
+        "5. Se o cliente pedir para falar com um atendente humano, responda educadamente que vai transferir o atendimento."
+    )
+
+    if numero_remetente not in historico_conversas:
+        historico_conversas[numero_remetente] = []
+
+    historico_conversas[numero_remetente].append({"role": "user", "content": mensagem_usuario})
+
+    if len(historico_conversas[numero_remetente]) > MAX_HISTORICO:
+        historico_conversas[numero_remetente] = historico_conversas[numero_remetente][-MAX_HISTORICO:]
+
+    mensagens_payload = [{"role": "system", "content": prompt_pizzaria}] + historico_conversas[numero_remetente]
+
+    payload = {
+        "model": "openai/gpt-oss-20b",
+        "messages": mensagens_payload,
+        "temperature": 0.6
+    }
+
+    try:
+        response = requests.post(url, json=payload, headers=headers, timeout=15)
+        print(f"Status Groq: {response.status_code}")
+        if response.status_code == 200:
+            resposta_ia = response.json()["choices"][0]["message"]["content"]
+            historico_conversas[numero_remetente].append({"role": "assistant", "content": resposta_ia})
+            return resposta_ia
+        else:
+            print(f"Erro Resposta Groq: {response.text}")
+            return "Ocorreu um erro ao processar sua solicitação."
+    except Exception as e:
+        print(f"Exceção Groq: {e}")
+        return "Desculpe, tive um problema ao tentar responder agora."
+
 
 @app.route('/', methods=['GET'])
 def home():
-    return "Servidor ativo!", 200
+    return "Servidor ativo com memória!", 200
+
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
     data = request.get_json()
-    print("--- WEBHOOK RECEBIDO ---")
-    print(data) # Imprime o JSON bruto no log do Render para sabermos o formato exato
-
     if not data:
         return jsonify({"status": "error"}), 400
 
     try:
         event = data.get('event')
-        if event == 'messages.upsert':
+        if event == 'MESSAGES_UPSERT':
             msg_data = data.get('data', {})
             key = msg_data.get('key', {})
 
@@ -36,10 +115,8 @@ def webhook():
 
             remote_jid = key.get('remoteJid', '')
             numero_remetente = remote_jid.split('@')[0]
-            print(f"Número remetente detectado: {numero_remetente}")
 
             if numero_remetente != NUMERO_PERMITIDO:
-                print(f"Número bloqueado pelo filtro: {numero_remetente}")
                 return jsonify({"status": "ignored_unauthorized_number"}), 200
 
             message_content = msg_data.get('message', {})
@@ -49,21 +126,17 @@ def webhook():
             )
 
             if not mensagem_texto:
-                print("Mensagem sem texto detectada.")
                 return jsonify({"status": "ignored_non_text_message"}), 200
 
-            print(f"Processando mensagem de {numero_remetente}: {mensagem_texto}")
-            
-            # Resposta direta temporária para teste de webhook
-            url = f"{EVOLUTION_API_URL}/message/sendText/{INSTANCE_NAME}"
-            headers = {"apikey": EVOLUTION_API_KEY, "Content-Type": "application/json"}
-            payload = {"number": numero_remetente, "text": "Recebido com sucesso pelo novo webhook!"}
-            requests.post(url, json=payload, headers=headers, timeout=10)
+            print(f"Mensagem recebida de {numero_remetente}: {mensagem_texto}")
+            resposta_ai = obter_resposta_groq(numero_remetente, mensagem_texto)
+            enviar_mensagem_whatsapp(numero_remetente, resposta_ai)
 
     except Exception as e:
-        print(f"Erro crítico no webhook: {e}")
+        print(f"Erro no webhook: {e}")
 
     return jsonify({"status": "success"}), 200
+
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
