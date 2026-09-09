@@ -4,8 +4,8 @@ from flask import Flask, request, jsonify
 
 app = Flask(__name__)
 
-EVOLUTION_API_URL = "https://evolution-api-ryan-wr3k.onrender.com"
-EVOLUTION_API_KEY = "minhasenha123"
+EVOLUTION_API_URL = "https://evolution-api-ryan.onrender.com"
+EVOLUTION_API_KEY = "171EF9DE-6B4B-4EC1-A3F9-F777669EE6F9"
 INSTANCE_NAME = "bot_whatsapp"
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 
@@ -22,16 +22,18 @@ def enviar_mensagem_whatsapp(numero, texto):
         "number": numero,
         "text": texto
     }
+    print(f"Enviando para Evolution API -> URL: {url} | Número: {numero}")
     try:
-        response = requests.post(url, json=payload, headers=headers, timeout=10)
+        response = requests.post(url, json=payload, headers=headers, timeout=15)
         print(f"Status envio WhatsApp: {response.status_code} - Resposta: {response.text}")
         return response.json()
     except Exception as e:
-        print(f"Erro envio WhatsApp: {e}")
+        print(f"ERRO CRÍTICO no envio WhatsApp: {e}")
         return None
 
 def obter_resposta_groq(numero_remetente, mensagem_usuario):
     if not GROQ_API_KEY:
+        print("ERRO: GROQ_API_KEY não configurada no ambiente!")
         return "Erro interno: Chave Groq não configurada."
 
     url = "https://api.groq.com/openai/v1/chat/completions"
@@ -74,13 +76,14 @@ def obter_resposta_groq(numero_remetente, mensagem_usuario):
 
     try:
         response = requests.post(url, json=payload, headers=headers, timeout=15)
+        print(f"Status Groq: {response.status_code}")
         if response.status_code == 200:
             resposta_ia = response.json()["choices"][0]["message"]["content"]
             historico_conversas[numero_remetente].append({"role": "assistant", "content": resposta_ia})
             return resposta_ia
         else:
-            print(f"Erro Groq: {response.text}")
-            return "Ocorreu um erro ao processar sua solicitação."
+            print(f"Erro Groq Detalhes: {response.text}")
+            return "Ocorreu um erro ao processar sua solicitação com a IA."
     except Exception as e:
         print(f"Exceção Groq: {e}")
         return "Desculpe, tive um problema ao tentar responder agora."
@@ -97,7 +100,7 @@ def webhook():
 
     try:
         event = data.get('event')
-        if event == 'MESSAGES_UPSERT':
+        if event == 'messages.upsert':
             msg_data = data.get('data', {})
             key = msg_data.get('key', {})
 
@@ -105,11 +108,10 @@ def webhook():
                 return jsonify({"status": "ignored_from_me"}), 200
 
             remote_jid = key.get('remoteJid', '')
-            # Extrai apenas os números do Jid com segurança
             numero_remetente = ''.join(filter(str.isdigit, remote_jid.split('@')[0]))
             
             if not numero_remetente:
-                numero_remetente = "559870166848" # Fallback para garantir envio
+                numero_remetente = "559870166848"
 
             message_content = msg_data.get('message', {})
             mensagem_texto = (
@@ -122,10 +124,11 @@ def webhook():
 
             print(f"Processando mensagem de {numero_remetente}: {mensagem_texto}")
             resposta_ai = obter_resposta_groq(numero_remetente, mensagem_texto)
+            print(f"Resposta gerada pela IA: {resposta_ai}")
             enviar_mensagem_whatsapp(numero_remetente, resposta_ai)
 
     except Exception as e:
-        print(f"Erro no webhook: {e}")
+        print(f"Erro geral no webhook: {e}")
 
     return jsonify({"status": "success"}), 200
 
