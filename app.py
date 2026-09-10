@@ -1,147 +1,185 @@
 import os
+import logging
 import requests
 import threading
+from datetime import datetime, timedelta
+from collections import OrderedDict
 from flask import Flask, request, jsonify
+from dotenv import load_dotenv
+from jsonschema import validate, ValidationError
+
+load_dotenv()
 
 app = Flask(__name__)
+app.config['JSON_AS_ASCII'] = False
 
-EVOLUTION_API_URL = "https://evolution-api-ryan.onrender.com"
-EVOLUTION_API_KEY = "171EF9DE-6B4B-4EC1-A3F9-F777669EE6F9"
-INSTANCE_NAME = "bot_whatsapp"
-GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
-historico_conversas = {}
-MAX_HISTORICO = 10
+EVOLUTION_API_URL = os.getenv("EVOLUTION_API_URL", "https://evolution-api-ryan.onrender.com").strip()
+EVOLUTION_API_KEY = os.getenv("EVOLUTION_API_KEY", "171EF9DE-6B4B-4EC1-A3F9-F777669EE6F9").strip()
+INSTANCE_NAME = os.getenv("INSTANCE_NAME", "bot_whatsapp").strip()
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "Gsk_eC6rJOD2pwU81eBR7ivAWGdyb3FYFJXcpEsylocRLma0zZfW0z90").strip()
+
+class HistoricoConversas:
+    def __init__(self, max_usuarios=500, max_mensagens=10, ttl_minutos=30):
+        self.dados = OrderedDict()
+        self.max_usuarios = max_usuarios
+        self.max_mensagens = max_mensagens
+        self.ttl = timedelta(minutes=ttl_minutos)
+        self.lock = threading.RLock()
+    
+    def _limpar_expirados(self):
+        agora = datetime.now()
+        expirados = [k for k, v in self.dados.items() if agora - v['ultima_atividade'] > self.ttl]
+        for k in expirados:
+            del self.dados[k]
+    
+    def adicionar_mensagem(self, numero, role, content):
+        with self.lock:
+            self._limpar_expirados()
+            if numero not in self.dados and len(self.dados) >= self.max_usuarios:
+                self.dados.popitem(last=False)
+            
+            if numero not in self.dados:
+                self.dados[numero] = {
+                    'mensagens': [],
+                    'ultima_atividade': datetime.now()
+                }
+            
+            self.dados[numero]['mensagens'].append({"role": role, "content": content})
+            self.dados[numero]['ultima_atividade'] = datetime.now()
+            
+            if len(self.dados[numero]['mensagens']) > self.max_mensagens:
+                self.dados[numero]['mensagens'] = self.dados[numero]['mensagens'][-self.max_mensagens:]
+    
+    def obter_historico(self, numero):
+        with self.lock:
+            return self.dados.get(numero, {}).get('mensagens', []).copy()
+
+historico = HistoricoConversas()
+
+WEBHOOK_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "event": {"type": "string"},
+        "data": {"type": "object"}
+    },
+    "required": ["event", "data"]
+}
 
 def enviar_mensagem_whatsapp(numero, texto):
+    if not EVOLUTION_API_URL or not EVOLUTION_API_KEY:
+        logger.error("Evolution API não configurada")
+        return None
+    
     url = f"{EVOLUTION_API_URL}/message/sendText/{INSTANCE_NAME}"
     headers = {
         "apikey": EVOLUTION_API_KEY,
         "Content-Type": "application/json"
     }
-    payload = {
-        "number": numero,
-        "text": texto
-    }
-    print(f"-> Enviando para Evolution API | Número: {numero}")
+    payload = {"number": numero, "text": texto}
+    
     try:
-        response = requests.post(url, json=payload, headers=headers, timeout=20)
-        print(f"<- Status envio WhatsApp: {response.status_code} - Resposta: {response.text}")
-        return response.json()
+        response = requests.post(url, json=payload, headers=headers, timeout=10)
+        return response.json() if response.status_code == 200 else None
     except Exception as e:
-        print(f"X ERRO CRÍTICO no envio WhatsApp: {e}")
+        logger.error(f"Erro ao enviar mensagem: {e}")
         return None
 
 def obter_resposta_groq(numero_remetente, mensagem_usuario):
     if not GROQ_API_KEY:
-        print("X ERRO: GROQ_API_KEY não configurada!")
-        return "Erro interno: Chave Groq não configurada."
-
-    url = "https://api.groq.com/openai/v1/chat/completions"
-    headers = {
-        "Authorization": f"Bearer {GROQ_API_KEY.strip()}",
-        "Content-Type": "application/json"
+        return "Erro: GROQ_API_KEY não configurada no ambiente."
+    
+    historico.adicionar_mensagem(numero_remetente, "user", mensagem_usuario)
+    messages_historico = historico.obter_historico(numero_remetente)
+    
+    system_prompt = {
+        "role": "system",
+        "content": (
+            "Você é o Mario, atendente virtual simpático da 'Pizzaria Bella Italia'.\n"
+            "CARDÁPIO:\n"
+            "- Média (R$ 40), Grande (R$ 50), Gigante (R$ 65).\n"
+            "- Sabores: Calabresa, Mussarela, Margherita, Frango c/ Catupiry.\n"
+            "- Especiais (+ R$ 5): Quatro Queijos, Bacon c/ Cheddar, Portuguesa.\n"
+            "- Bebidas: Coca 2L (R$ 12), Guaraná 2L (R$ 10), Água (R$ 4).\n"
+            "- Taxa de entrega: R$ 7,00.\n"
+            "Guie o pedido passo a passo até o resumo final."
+        )
     }
-
-    prompt_pizzaria = (
-        "Você é o Mario, atendente virtual simpático e ágil da 'Pizzaria Bella Italia'.\n"
-        "Sua missão é atender os clientes no WhatsApp, apresentar o cardápio e anotar pedidos.\n\n"
-        "CARDÁPIO:\n"
-        "- Tamanhos: Média (6 fatias - R$ 40), Grande (8 fatias - R$ 50), Gigante (12 fatias - R$ 65).\n"
-        "- Sabores Tradicionais: Calabresa, Mussarela, Margherita, Frango com Catupiry.\n"
-        "- Sabores Especiais (+ R$ 5): Quatro Queijos, Bacon com Cheddar, Portuguesa.\n"
-        "- Bebidas: Coca-Cola 2L (R$ 12), Guaraná 2L (R$ 10), Água (R$ 4).\n"
-        "- Taxa de entrega fixa: R$ 7,00.\n\n"
-        "REGRAS DE ATENDIMENTO:\n"
-        "1. Seja sempre educado, amigável e use emojis com moderação.\n"
-        "2. Preste atenção no histórico da conversa para não esquecer o sabor, tamanho ou bebidas já escolhidos.\n"
-        "3. Guie o cliente passo a passo: Sabor e Tamanho -> Bebida -> Endereço -> Pagamento.\n"
-        "4. Ao confirmar tudo, mostre o RESUMO DO PEDIDO detalhado com valor total e tempo estimado (40-50 min)."
-    )
-
-    if numero_remetente not in historico_conversas:
-        historico_conversas[numero_remetente] = []
-
-    historico_conversas[numero_remetente].append({"role": "user", "content": mensagem_usuario})
-
-    if len(historico_conversas[numero_remetente]) > MAX_HISTORICO:
-        historico_conversas[numero_remetente] = historico_conversas[numero_remetente][-MAX_HISTORICO:]
-
-    mensagens_payload = [{"role": "system", "content": prompt_pizzaria}] + historico_conversas[numero_remetente]
-
+    
     payload = {
-        "model": "openai/gpt-oss-20b",
-        "messages": mensagens_payload,
+        "model": "llama-3.3-70b-versatile",
+        "messages": [system_prompt] + messages_historico,
         "temperature": 0.6
     }
-
+    
     try:
-        print(f"-> Consultando IA Groq para {numero_remetente}...")
-        response = requests.post(url, json=payload, headers=headers, timeout=20)
-        print(f"<- Status Groq: {response.status_code}")
+        response = requests.post(
+            "https://api.groq.com/openai/v1/chat/completions",
+            json=payload,
+            headers={"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"},
+            timeout=15
+        )
         if response.status_code == 200:
             resposta_ia = response.json()["choices"][0]["message"]["content"]
-            historico_conversas[numero_remetente].append({"role": "assistant", "content": resposta_ia})
+            historico.adicionar_mensagem(numero_remetente, "assistant", resposta_ia)
             return resposta_ia
-        else:
-            print(f"X Erro Groq Detalhes: {response.text}")
-            return "Ocorreu um erro ao processar sua solicitação com a IA."
+        return "Desculpe, tive um problema técnico ao processar a resposta."
     except Exception as e:
-        print(f"X Exceção Groq: {e}")
-        return "Desculpe, tive um problema ao tentar responder agora."
+        logger.error(f"Erro na Groq: {e}")
+        return "Desculpe, tente novamente em instantes."
 
 def processar_background(numero_remetente, mensagem_texto):
-    try:
-        resposta_ai = obter_resposta_groq(numero_remetente, mensagem_texto)
-        print(f"-> Resposta gerada pela IA: {resposta_ai}")
+    resposta_ai = obter_resposta_groq(numero_remetente, mensagem_texto)
+    if resposta_ai:
         enviar_mensagem_whatsapp(numero_remetente, resposta_ai)
-    except Exception as e:
-        print(f"X Erro no background worker: {e}")
 
 @app.route('/', methods=['GET'])
 def home():
-    return "Servidor ativo!", 200
+    return jsonify({"status": "online", "bot": "Pizzaria Bella Italia"}), 200
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
-    data = request.get_json()
-    if not data:
-        return jsonify({"status": "error"}), 400
-
     try:
-        event = data.get('event')
-        if event == 'messages.upsert':
-            msg_data = data.get('data', {})
-            key = msg_data.get('key', {})
-
-            if key.get('fromMe'):
-                return jsonify({"status": "ignored_from_me"}), 200
-
-            remote_jid = key.get('remoteJid', '')
-            numero_remetente = ''.join(filter(str.isdigit, remote_jid.split('@')[0]))
-            
-            if not numero_remetente:
-                return jsonify({"status": "ignored_no_number"}), 200
-
-            message_content = msg_data.get('message', {})
-            mensagem_texto = (
-                message_content.get('conversation') or
-                message_content.get('extendedTextMessage', {}).get('text')
-            )
-
-            if not mensagem_texto:
-                return jsonify({"status": "ignored_non_text_message"}), 200
-
-            print(f"-> Webhook aceito | Mensagem de {numero_remetente}: {mensagem_texto}")
-            
-            # Dispara em background para liberar o webhook imediatamente
-            t = threading.Thread(target=processar_background, args=(numero_remetente, mensagem_texto))
-            t.start()
-
+        data = request.get_json()
+        validate(instance=data, schema=WEBHOOK_SCHEMA)
+        
+        if data.get('event') != 'messages.upsert':
+            return jsonify({"status": "ignored"}), 200
+        
+        msg_data = data.get('data', {})
+        key = msg_data.get('key', {})
+        
+        if key.get('fromMe'):
+            return jsonify({"status": "ignored_from_me"}), 200
+        
+        remote_jid = key.get('remoteJid', '')
+        numero_remetente = ''.join(filter(str.isdigit, remote_jid.split('@')[0]))
+        
+        message_content = msg_data.get('message', {})
+        mensagem_texto = (
+            message_content.get('conversation') or
+            message_content.get('extendedTextMessage', {}).get('text', '')
+        )
+        
+        if not mensagem_texto or not numero_remetente:
+            return jsonify({"status": "ignored_no_text"}), 200
+        
+        t = threading.Thread(
+            target=processar_background,
+            args=(numero_remetente, mensagem_texto),
+            daemon=True
+        )
+        t.start()
+        
+        return jsonify({"status": "success"}), 200
     except Exception as e:
-        print(f"X Erro geral no webhook: {e}")
-
-    return jsonify({"status": "success"}), 200
+        logger.error(f"Erro webhook: {e}")
+        return jsonify({"status": "error"}), 500
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000)
+    app.run(host='0.0.0.0', port=int(os.getenv('PORT', 5000)))

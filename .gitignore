@@ -1,0 +1,9 @@
+.env
+.env.local
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store
+venv/
+arquivos_permitidos/
+*.log
